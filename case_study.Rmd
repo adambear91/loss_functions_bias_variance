@@ -1,0 +1,398 @@
+---
+title: 'Case Study: k-NN & Lasso'
+author: "Adam Bear"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(latex2exp)
+library(patchwork)
+library(furrr) 
+plan("multisession")
+source("utilities.R", local = TRUE)
+load("Data/jesterFull.RData") # loads jokes data (bigLaugh)
+
+seed <- 2020
+```
+
+## Simulated Data Set
+
+```{r sim data}
+set.seed(seed)
+nAgents <- 10000
+nFeatures <- 20
+nItems <- 100
+epsilon <- 10 # SD for random noise
+agentHetero <- .5 # heterogeneity of agent's preferences (in SD)
+temperature <- 10 # temperature for logistic function
+
+simData <-
+    matrix(
+        sample(c(-1, 1), nFeatures * nAgents, replace = TRUE) *
+            rexp(nFeatures * nAgents, rate = agentHetero),
+        nrow = nAgents) %*% # agent coefficients
+    matrix(rnorm(nFeatures * nItems), ncol = nItems) + # each joke's feature values
+    matrix(rnorm(nAgents * nItems, sd = epsilon), ncol = nItems) # random noise
+
+# Pass data through logistic function with range -10 to 10
+simData <- -10 + 20 / (1 + exp(-simData/temperature))
+```
+
+### k-NN
+#### Power losses
+
+```{r sim knn power}
+set.seed(seed)
+n_universes <- 500 # number of universes to create
+n_agents <- 100 # number of agents to consider
+n_train <- 10   # number of items to train on
+n_test <- 25   # number of items to test on
+power_losses <- sort(c(1:10, 1/2:10))
+
+df_sim_knn_powerloss <- future_map_dfr(
+    seq_len(n_universes),
+    ~simUniverse(simData, n_agents, n_train, n_test, power_losses = power_losses),
+    .id = "universe",
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+
+```{r sim knn power plot}
+df_sim_knn_powerloss <- read_csv("Data/df_sim_knn_powerloss.csv")
+
+sim_knn_powerloss_plot <- df_sim_knn_powerloss %>% 
+    group_by(power_loss, universe) %>%
+    mutate(optimal_k = cost == min(cost)) %>%
+    filter(optimal_k) %>%
+    summarize(k = mean(k), .groups = "drop_last") %>%
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    ggplot(aes(power_loss, k)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_log10(
+        "Loss Power (p)", 
+        breaks = c(seq(10, 2, -2)^-1, 1, seq(2, 10, 2)),
+        labels = c(TeX(str_c("$",seq(10, 2, -2), "^{-1}$")), "1", seq(2, 10, 2))
+    ) +
+    scale_y_continuous(
+        "Optimal k-NN", 
+        limits = c(1, 100), breaks = c(1, seq(10, 100, 10))
+    )
+
+sim_knn_powerloss_plot
+```
+
+#### Tolerance losses
+
+```{r sim knn tolerance}
+set.seed(seed)
+n_universes <- 500 # number of universes to create
+n_agents <- 100 # number of agents to consider
+n_train <- 10   # number of items to train on
+n_test <- 25   # number of items to test on
+ts <- seq(.5, 10, .5) # epsilon thresholds for tolerance loss model
+
+df_sim_knn_tolerance <- future_map_dfr(
+    seq_len(n_universes),
+    ~simUniverse(simData, n_agents, n_train, n_test, mode = "tolerance", ts = ts),
+    .id = "universe",
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+
+```{r sim knn tolerance plot}
+df_sim_knn_tolerance <- read_csv("Data/df_sim_knn_tolerance.csv")
+
+sim_knn_tolerance_plot <- df_sim_knn_tolerance %>% 
+    group_by(epsilon, universe) %>% 
+    mutate(optimal_k = cost == min(cost)) %>% 
+    filter(optimal_k) %>% 
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    ggplot(aes(epsilon, k)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_continuous(
+        "Tolerance (t)", 
+        limits = c(0, 10), breaks = seq(0, 10, 2)
+    ) +
+    scale_y_continuous(
+        "Optimal k-NN", 
+        limits = c(1, 100), breaks = c(1, seq(10, 100, 10))
+    )  
+
+sim_knn_tolerance_plot
+```
+
+### Lasso regression
+#### Power losses
+
+```{r sim lasso power}
+set.seed(seed)
+n_universes <- 10000
+n_agents <- 100
+n_train <- 10
+n_test <- 25
+lambdas <- seq(.01, 2, by = .01)
+power_losses <- sort(c(1:10, 1/2:10))
+
+df_sim_lasso_powerloss <- future_map_dfr(
+    seq_len(n_universes),
+    ~optimizeLasso(simData, n_agents, n_train, n_test, lambdas, power_losses),
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+
+```{r sim lasso power plot}
+df_sim_lasso_powerloss <- read_csv("Data/df_sim_lasso_powerloss.csv")
+
+sim_lasso_powerloss_plot <- df_sim_lasso_powerloss %>% 
+    group_by(power_loss) %>% 
+    summarize(opt_lambda = mean(opt_lambda), .groups = "drop_last") %>% 
+    ggplot(aes(power_loss, opt_lambda)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_log10(
+        "Loss Power (p)", 
+        breaks = c(seq(10, 2, -2)^-1, 1, seq(2, 10, 2)),
+        labels = c(TeX(str_c("$",seq(10, 2, -2), "^{-1}$")), "1", seq(2, 10, 2))
+    ) +
+    scale_y_continuous(
+        TeX("Optimal Regularization ($\\lambda$)"), 
+        limits = c(.8, 1.8), breaks = seq(.8, 1.8, .1)
+    )
+
+sim_lasso_powerloss_plot
+```
+
+#### Tolerance losses
+```{r sim lasso tolerance}
+set.seed(seed)
+n_universes <- 10000
+n_agents <- 100
+n_train <- 10
+n_test <- 25
+lambdas <- seq(.01, 2, by = .01)
+ts <- seq(.5, 10, .5)
+
+df_sim_lasso_tolerance <- future_map_dfr(
+    seq_len(n_universes),
+    ~optimizeLasso(simData, n_agents, n_train, n_test, lambdas, ts = ts),
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+
+```{r sim lasso tolerance plot}
+df_sim_lasso_tolerance <- read_csv("Data/df_sim_lasso_tolerance.csv")
+
+sim_lasso_tolerance_plot <- df_sim_lasso_tolerance %>% 
+    group_by(epsilon) %>% 
+    summarize(opt_lambda = mean(opt_lambda), .groups = "drop_last") %>% 
+    ggplot(aes(epsilon, opt_lambda)) + 
+    geom_point(shape = 2, size = .75) +
+    scale_x_continuous(
+        "Tolerance (t)", 
+        limits = c(0, 10), breaks = seq(0, 10, 2)
+    ) +
+    scale_y_continuous(
+        TeX("Optimal Regularization ($\\lambda$)"), 
+        limits = c(.8, 1.8), breaks = seq(.8, 1.8, .1)
+    )
+
+sim_lasso_tolerance_plot
+```
+
+
+## Joke Data Set
+### k-NN
+#### Power losses
+
+```{r jokes knn power}
+set.seed(seed)
+n_universes <- 500 # number of universes to create
+n_agents <- 100 # number of agents to consider
+n_train <- 10   # number of items to train on
+n_test <- 25   # number of items to test on
+power_losses <- sort(c(1:10, 1/2:10))
+
+df_jokes_knn_powerloss <- future_map_dfr(
+    seq_len(n_universes),
+    ~simUniverse(bigLaugh, n_agents, n_train, n_test, power_losses = power_losses),
+    .id = "universe",
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+```{r jokes knn power plot}
+df_jokes_knn_powerloss <- read_csv("Data/df_jokes_knn_powerloss.csv")
+
+jokes_knn_powerloss_plot <- df_jokes_knn_powerloss %>% 
+    group_by(power_loss, universe) %>%
+    mutate(optimal_k = cost == min(cost)) %>%
+    filter(optimal_k) %>%
+    summarize(k = mean(k), .groups = "drop_last") %>%
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    ggplot(aes(power_loss, k)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_log10(
+        "Loss Power (p)", 
+        breaks = c(seq(10, 2, -2)^-1, 1, seq(2, 10, 2)),
+        labels = c(TeX(str_c("$",seq(10, 2, -2), "^{-1}$")), "1", seq(2, 10, 2))
+    ) +
+    scale_y_continuous(
+        "Optimal k-NN", 
+        limits = c(1, 100), breaks = c(1, seq(10, 100, 10))
+    )
+
+jokes_knn_powerloss_plot
+```
+
+#### Tolerance losses
+
+```{r jokes knn tolerance}
+set.seed(seed)
+n_universes <- 500 # number of universes to create
+n_agents <- 100 # number of agents to consider
+n_train <- 10   # number of items to train on
+n_test <- 25   # number of items to test on
+ts <- seq(.5, 10, .5) # epsilon thresholds for tolerance loss model
+
+df_jokes_knn_tolerance <- future_map_dfr(
+    seq_len(n_universes),
+    ~simUniverse(bigLaugh, n_agents, n_train, n_test, mode = "tolerance", ts = ts),
+    .id = "universe",
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+```{r jokes knn tolerance plot}
+df_jokes_knn_tolerance <- read_csv("Data/df_jokes_knn_tolerance.csv")
+
+jokes_knn_tolerance_plot <- df_jokes_knn_tolerance %>% 
+    group_by(epsilon, universe) %>% 
+    mutate(optimal_k = cost == min(cost)) %>% 
+    filter(optimal_k) %>% 
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    summarize(k = mean(k), .groups = "drop_last") %>% 
+    ggplot(aes(epsilon, k)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_continuous(
+        "Tolerance (t)", 
+        limits = c(0, 10), breaks = seq(0, 10, 2)
+    ) +
+    scale_y_continuous(
+        "Optimal k-NN", 
+        limits = c(1, 100), breaks = c(1, seq(10, 100, 10))
+    )
+
+jokes_knn_tolerance_plot
+```
+
+### Lasso regression
+#### Power losses
+
+```{r jokes lasso power}
+set.seed(seed)
+n_universes <- 10000
+n_agents <- 100
+n_train <- 10
+n_test <- 25
+lambdas <- seq(.01, 2, by = .01)
+power_losses <- sort(c(1:10, 1/2:10))
+
+df_jokes_lasso_powerloss <- future_map_dfr(
+    seq_len(n_universes),
+    ~optimizeLasso(bigLaugh, n_agents, n_train, n_test, lambdas, power_losses),
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+
+
+```{r jokes lasso power plot}
+df_jokes_lasso_powerloss <- read_csv("Data/df_jokes_lasso_powerloss.csv")
+
+jokes_lasso_powerloss_plot <- df_jokes_lasso_powerloss %>% 
+    group_by(power_loss) %>% 
+    summarize(opt_lambda = mean(opt_lambda), .groups = "drop_last") %>% 
+    ggplot(aes(power_loss, opt_lambda)) +
+    geom_point(shape = 2, size = .75) +
+    scale_x_log10(
+        "Loss Power (p)", 
+        breaks = c(seq(10, 2, -2)^-1, 1, seq(2, 10, 2)),
+        labels = c(TeX(str_c("$",seq(10, 2, -2), "^{-1}$")), "1", seq(2, 10, 2))
+    ) +
+    scale_y_continuous(
+        TeX("Optimal Regularization ($\\lambda$)"), 
+        limits = c(.8, 1.8), breaks = seq(.8, 1.8, .1)
+    )
+
+jokes_lasso_powerloss_plot
+```
+
+#### Tolerance losses
+```{r jokes lasso tolerance}
+set.seed(seed)
+n_universes <- 10000
+n_agents <- 100
+n_train <- 10
+n_test <- 25
+lambdas <- seq(.01, 2, by = .01)
+ts <- seq(.5, 10, .5)
+
+df_jokes_lasso_tolerance <- future_map_dfr(
+    seq_len(n_universes),
+    ~optimizeLasso(bigLaugh, n_agents, n_train, n_test, lambdas, ts = ts),
+    .options = future_options(seed = TRUE),
+    .progress = TRUE
+)
+```
+```{r jokes lasso tolerance plot}
+df_jokes_lasso_tolerance <- read_csv("Data/df_jokes_lasso_tolerance.csv")
+
+jokes_lasso_tolerance_plot <- df_jokes_lasso_tolerance %>% 
+    group_by(epsilon) %>% 
+    summarize(opt_lambda = mean(opt_lambda), .groups = "drop_last") %>% 
+    ggplot(aes(epsilon, opt_lambda)) + 
+    geom_point(shape = 2, size = .75) +
+    scale_x_continuous(
+        "Tolerance (t)", 
+        limits = c(0, 10), breaks = seq(0, 10, 2)
+    ) +
+    scale_y_continuous(
+        TeX("Optimal Regularization ($\\lambda$)"), 
+        limits = c(.8, 1.8), breaks = seq(.8, 1.8, .1)
+    )
+
+jokes_lasso_tolerance_plot
+```
+
+## Combined Figures
+```{r sim knn combined plot}
+sim_knn_powerloss_plot / sim_knn_tolerance_plot
+ggsave("Figures/fig_knn_simulated.pdf", width = 6, height = 8)
+```
+
+```{r sim lasso combined plot}
+sim_lasso_powerloss_plot / sim_lasso_tolerance_plot
+ggsave("Figures/fig_lasso_simulated.pdf", width = 6, height = 8)
+```
+
+```{r jokes knn combined plot}
+jokes_knn_powerloss_plot / jokes_knn_tolerance_plot
+ggsave("Figures/fig_knn_jester.pdf", width = 6, height = 8)
+```
+```{r jokes lasso combined plot}
+jokes_lasso_powerloss_plot / jokes_lasso_tolerance_plot
+ggsave("Figures/fig_lasso_jester.pdf", width = 6, height = 8)
+```
+
